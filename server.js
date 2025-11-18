@@ -3,7 +3,7 @@ const WebSocket = require('ws');
 const firebaseAccess = require('./firebaseAccess');
 
 const PORT = process.env.PORT || 4000;
-const HISTORY_PAGE_SIZE = 20;
+const HISTORY_PAGE_SIZE = 8;
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
@@ -36,9 +36,9 @@ const broadcastToChannel = (channelId, payload) => {
 
 const sendChannelUsers = (socket, channelId) => {
   const sockets = socketsPerChannel.get(channelId) || [];
-  const users = sockets.map((entry, index) => ({
+  const users = sockets.map((entry) => ({
     username: entry.username,
-    sequenceNumber: index + 1
+    userId: entry.userId
   }));
 
   socket.send(JSON.stringify({
@@ -48,18 +48,19 @@ const sendChannelUsers = (socket, channelId) => {
   }));
 };
 
-const broadcastUserJoin = (channelId, username, sequenceNumber) => {
+const broadcastUserJoin = (channelId, username, userId) => {
   broadcastToChannel(channelId, {
     type: 'user-joined',
-    from: username,
-    sequenceNumber
+    username,
+    userId
   });
 };
 
-const broadcastUserLeave = (channelId, username) => {
+const broadcastUserLeave = (channelId, username, userId) => {
   broadcastToChannel(channelId, {
     type: 'user-left',
-    from: username
+    username,
+    userId
   });
 };
 
@@ -160,12 +161,12 @@ const onUserJoin = (socket, channelId, username) => {
   socket.username = username;
 
   sockets.push(socket);
-  broadcastUserJoin(channelId, username, sockets.length);
+  broadcastUserJoin(channelId, username, socket.userId || null);
   sendChannelUsers(socket, channelId);
 };
 
 const onDisconnect = (socket) => {
-  const { channelId, username } = socket;
+  const { channelId, username, userId } = socket;
   detachUserProfileWatcher(socket);
   if (!channelId) {
     return;
@@ -186,7 +187,7 @@ const onDisconnect = (socket) => {
   }
 
   if (username) {
-    broadcastUserLeave(channelId, username);
+    broadcastUserLeave(channelId, username, userId)
   }
 };
 
@@ -339,10 +340,10 @@ const handleChannelJoin = async (socket, channelId, frbDecodedToken) => {
 wss.on('connection', (ws) => {
   console.log('Client connected');
 
-  ws.send(JSON.stringify({
+  /*ws.send(JSON.stringify({
     type: 'system',
     text: 'Welcome to the chat server!'
-  }));
+  }));*/
 
   ws.on('message', async (raw) => {
     let msg;

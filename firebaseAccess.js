@@ -231,7 +231,7 @@ class FirebaseAccess extends EventEmitter {
     return null;
   }
 
-  async fetchRecentMessages(channelId, limit = 20, beforeTs) {
+  async fetchRecentMessages(channelId, limit = 8, beforeTs) {
     if (!channelId) {
       return [];
     }
