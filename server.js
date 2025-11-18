@@ -3,6 +3,7 @@ const WebSocket = require('ws');
 const firebaseAccess = require('./firebaseAccess');
 
 const PORT = process.env.PORT || 4000;
+const HISTORY_PAGE_SIZE = 20;
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
@@ -118,6 +119,36 @@ const detachUserProfileWatcher = (socket) => {
 firebaseAccess.on('channels-updated', () => {
   enforceChannelPolicies();
 });
+
+const sendChannelHistory = (socket, channelId, messages) => {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  socket.send(JSON.stringify({
+    type: 'channel-history',
+    channelId,
+    messages: messages || []
+  }));
+};
+
+const sendRecentHistory = async (socket, channelId, beforeTs) => {
+  if (!channelId) {
+    return;
+  }
+
+  try {
+    const messages = await firebaseAccess.fetchRecentMessages(
+      channelId,
+      HISTORY_PAGE_SIZE,
+      beforeTs
+    );
+    sendChannelHistory(socket, channelId, messages);
+  } catch (err) {
+    console.error('Failed to send channel history', err);
+    sendSocketError(socket, 'Unable to load chat history');
+  }
+};
 
 const onUserJoin = (socket, channelId, username) => {
   const sockets = getSocketsForChannel(channelId);
@@ -300,6 +331,9 @@ const handleChannelJoin = async (socket, channelId, frbDecodedToken) => {
   attachUserProfileWatcher(socket, frbUserProfile || null);
 
   onUserJoin(socket, channelId, username);
+  sendRecentHistory(socket, channelId).catch((err) => {
+    console.error('Failed to send initial history', err);
+  });
 };
 
 wss.on('connection', (ws) => {
@@ -379,6 +413,27 @@ wss.on('connection', (ws) => {
       };
 
       broadcastChatMessage(channelId, payload);
+      firebaseAccess.saveChatMessage(channelId, {
+        ...payload,
+        userId: ws.userId || null
+      });
+    }
+
+    if (msg.type === 'fetch-history') {
+      const channelId = msg.channelId || ws.channelId;
+      if (!channelId) {
+        sendSocketError(ws, 'History request missing channelId');
+        return;
+      }
+
+      if (ws.channelId !== channelId) {
+        sendSocketError(ws, 'You can only request history for your current channel');
+        return;
+      }
+
+      const beforeTs = typeof msg.beforeTs === 'number' ? msg.beforeTs : undefined;
+      await sendRecentHistory(ws, channelId, beforeTs);
+      return;
     }
   });
 

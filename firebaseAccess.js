@@ -201,6 +201,57 @@ class FirebaseAccess extends EventEmitter {
       }
     };
   }
+
+  getChannelMessagesCollection(channelId) {
+    if (!channelId) {
+      throw new Error('channelId is required');
+    }
+
+    return this.frbDb
+      .collection('channelMessages')
+      .doc(channelId)
+      .collection('messages');
+  }
+
+  async saveChatMessage(channelId, message) {
+    if (!channelId || !message) {
+      return null;
+    }
+
+    const doc = {
+      ...message,
+      channelId
+    };
+
+    try {
+      await this.getChannelMessagesCollection(channelId).add(doc);
+    } catch (err) {
+      console.error('Failed to persist chat message', err);
+    }
+    return null;
+  }
+
+  async fetchRecentMessages(channelId, limit = 20, beforeTs) {
+    if (!channelId) {
+      return [];
+    }
+
+    try {
+      let query = this.getChannelMessagesCollection(channelId).orderBy('ts', 'desc');
+
+      if (typeof beforeTs === 'number') {
+        query = query.where('ts', '<', beforeTs);
+      }
+
+      query = query.limit(limit);
+
+      const snapshot = await query.get();
+      return snapshot.docs.map((doc) => doc.data());
+    } catch (err) {
+      console.error('Failed to fetch chat history', err);
+      return [];
+    }
+  }
 }
 
 module.exports = new FirebaseAccess();
