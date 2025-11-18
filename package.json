@@ -1,0 +1,17 @@
+{
+  "name": "wcp-chat-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "ws": "^8.18.3"
+  }
+}
