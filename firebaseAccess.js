@@ -64,7 +64,7 @@ class FirebaseAccess extends EventEmitter {
     this.frbChannelsDocRef.onSnapshot(
       (snapshot) => {
         const data = snapshot.data();
-        const channels = Array.isArray(data?.items) ? data.items : [];
+        const channels = this.extractChannelsArray(data);
         this.updateChannelCache(channels);
       },
       (err) => {
@@ -91,6 +91,7 @@ class FirebaseAccess extends EventEmitter {
 
   getCachedChannel(channelId) {
     if (!channelId) {
+      console.log('getCachedChannel called without channelId');
       return null;
     }
 
@@ -99,6 +100,7 @@ class FirebaseAccess extends EventEmitter {
 
   async fetchChannelDefinition(channelId) {
     if (!channelId) {
+      console.log('fetchChannelDefinition called without channelId');
       return null;
     }
 
@@ -120,12 +122,28 @@ class FirebaseAccess extends EventEmitter {
       }
 
       const data = snapshot.data();
-      const channels = Array.isArray(data?.channels) ? data.channels : [];
+      const channels = this.extractChannelsArray(data);
       this.updateChannelCache(channels);
     } catch (err) {
       console.error('Failed to fetch channel config', err);
       throw err;
     }
+  }
+
+  extractChannelsArray(data) {
+    if (!data) {
+      return [];
+    }
+
+    if (Array.isArray(data.channels)) {
+      return data.channels;
+    }
+
+    if (Array.isArray(data.items)) {
+      return data.items;
+    }
+
+    return [];
   }
 
   async fetchUserProfile(userId) {
