@@ -8,6 +8,8 @@ const HISTORY_PAGE_SIZE = 8;
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 const socketsPerChannel = new Map();
+const pendingSignals = new Map();
+const SIGNAL_BUFFER_TTL_MS = 10000; // 10 seconds
 
 const getSocketsForChannel = (channelId) => {
   if (!channelId) {
@@ -163,6 +165,7 @@ const onUserJoin = (socket, channelId, username) => {
   sockets.push(socket);
   broadcastUserJoin(channelId, username, socket.userId || null);
   sendChannelUsers(socket, channelId);
+  flushBufferedSignals(socket);
 };
 
 const onDisconnect = (socket) => {
@@ -197,6 +200,187 @@ const findChannelMember = (channelDef, userId) => {
   }
 
   return channelDef.members.find((member) => member.userId === userId);
+};
+
+const findSocketInChannel = (channelId, userId) => {
+  if (!channelId || !userId) {
+    return undefined;
+  }
+
+  const sockets = socketsPerChannel.get(channelId) || [];
+  return sockets
+    .filter((entry) => entry.userId === userId)
+    .find((entry) => entry.readyState === WebSocket.OPEN);
+};
+
+const bufferSignal = (channelId, targetUserId, payload) => {
+  const key = `${channelId}:${targetUserId}`;
+  if (!pendingSignals.has(key)) {
+    pendingSignals.set(key, []);
+  }
+
+  const expiresAt = Date.now() + SIGNAL_BUFFER_TTL_MS;
+  pendingSignals.get(key).push({
+    payload,
+    expiresAt
+  });
+};
+
+const flushBufferedSignals = (socket) => {
+  if (!socket.channelId || !socket.userId) {
+    return;
+  }
+
+  const key = `${socket.channelId}:${socket.userId}`;
+  const buffered = pendingSignals.get(key);
+  if (!buffered || buffered.length === 0) {
+    return;
+  }
+
+  const now = Date.now();
+  const remaining = [];
+  buffered.forEach((entry) => {
+    if (entry.expiresAt < now) {
+      console.log('Discarded expired buffered signal for', socket.userId);
+      return;
+    }
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(entry.payload));
+      console.log('Buffered signal sent to', socket.userId, 'in channel', socket.channelId);
+    } else {
+      remaining.push(entry);
+      confirm.log('Socket not open, keeping buffered signal for', socket.userId);
+    }
+  });
+
+  if (remaining.length === 0) {
+    pendingSignals.delete(key);
+  } else {
+    pendingSignals.set(key, remaining);
+  }
+};
+
+const forwardWebRTCSignal = (msg, ws) => {
+  const { channelId: msgChannelId, targetUserId } = msg;
+
+  // Determine the effective channel: from message or from socket
+  const channelId = msgChannelId || ws.channelId;
+  if (!channelId) {
+    sendSocketError(ws, 'WebRTC signaling missing channel context');
+    return;
+  }
+
+  if (!ws.channelId || ws.channelId !== channelId) {
+    sendSocketError(ws, 'You can only signal within your current channel');
+    return;
+  }
+
+  // Must have some role to participate at all
+  if (!ws.channelRole) {
+    sendSocketError(ws, 'Join a channel with a valid role before using WebRTC');
+    return;
+  }
+
+  // Observers are allowed to ACCEPT (answer/ICE) but not INITIATE (offer)
+  if (ws.channelRole === 'observer' && msg.type === 'webrtc-offer') {
+    sendSocketError(ws, 'Observer role cannot initiate calls in this channel');
+    return;
+  }
+
+  if (!targetUserId) {
+    sendSocketError(ws, 'WebRTC signaling missing target user');
+    return;
+  }
+
+  console.log(`Forwarding WebRTC ${msg.type} from ${ws.userId} to ${targetUserId} in channel ${channelId}`);
+  const targetSocket = findSocketInChannel(channelId, targetUserId);
+  if (!targetSocket) {
+    bufferSignal(channelId, targetUserId, {
+      type: msg.type,
+      channelId,
+      from: ws.username,
+      userId: ws.userId,
+      fromUserId: ws.userId,
+      targetUserId,
+      sdp: msg.sdp,
+      candidate: msg.candidate
+    });
+    //sendSocketError(ws, 'Target user is reconnecting');
+    console.log('Target user is reconnecting. Buffered signal for', targetUserId);
+    return;
+  }
+
+
+  // Only forward a subset of fields to avoid leaking unwanted data
+  const payload = {
+    type: msg.type,          // "webrtc-offer" | "webrtc-answer" | "webrtc-ice"
+    channelId,
+    fromUserId: ws.userId,
+    targetUserId,
+    from: ws.username,
+    userId: ws.userId,
+  };
+
+  if (msg.sdp) {
+    payload.sdp = msg.sdp;
+  }
+  if (msg.candidate) {
+    payload.candidate = msg.candidate;
+  }
+
+  targetSocket.send(JSON.stringify(payload));
+};
+
+const forwardCallSignal = (msg, ws) => {
+  const { channelId: msgChannelId, targetUserId } = msg;
+
+  const channelId = msgChannelId || ws.channelId;
+  if (!channelId) {
+    sendSocketError(ws, 'Call signaling missing channel context');
+    return;
+  }
+
+  if (!ws.channelId || ws.channelId !== channelId) {
+    sendSocketError(ws, 'You can only signal within your current channel');
+    return;
+  }
+
+  if (!ws.userId) {
+    sendSocketError(ws, 'Call signaling requires an authenticated user');
+    return;
+  }
+
+  if (!targetUserId) {
+    sendSocketError(ws, 'Call signaling missing target user');
+    return;
+  }
+
+  console.log(`Forwarding call ${msg.type} from ${ws.userId} to ${targetUserId} in channel ${channelId}`);
+  const targetSocket = findSocketInChannel(channelId, targetUserId);
+  if (!targetSocket) {
+    bufferSignal(channelId, targetUserId, {
+      type: msg.type,
+      channelId,
+      fromUserId: ws.userId,
+      targetUserId,
+      from: ws.username,
+      userId: ws.userId,
+
+    });
+    sendSocketError(ws, 'Target user is reconnecting');
+    return;
+  }
+
+  const payload = {
+    type: msg.type,         // "call-cancelled" | "call-rejected" | "call-ended"
+    channelId,
+    fromUserId: ws.userId,
+    targetUserId,
+    from: ws.username,
+    userId: ws.userId,
+  };
+
+  targetSocket.send(JSON.stringify(payload));
 };
 
 const getChannelMaxUsers = (channelDef) => {
@@ -377,6 +561,7 @@ wss.on('connection', (ws) => {
         ws.userId = frbDecodedToken.uid;
         ws.frbClaims = frbDecodedToken;
         await handleChannelJoin(ws, channelId, frbDecodedToken);
+        console.log(`User ${ws.userId} joined channel ${channelId}`);
       } catch (err) {
         console.error('Failed to complete join', err);
         sendSocketError(ws, err.message || 'Join failed');
@@ -436,11 +621,40 @@ wss.on('connection', (ws) => {
       await sendRecentHistory(ws, channelId, beforeTs);
       return;
     }
+
+    if (
+      msg.type === 'webrtc-offer' ||
+      msg.type === 'webrtc-answer' ||
+      msg.type === 'webrtc-ice'
+    ) {
+      try {
+        forwardWebRTCSignal(msg, ws);
+      } catch (err) {
+        console.error('Failed to handle WebRTC signaling', err);
+        sendSocketError(ws, 'WebRTC signaling error');
+      }
+      return;
+    }
+
+    if (
+      msg.type === 'call-cancelled' ||
+      msg.type === 'call-rejected' ||
+      msg.type === 'call-ended'
+    ) {
+      try {
+        forwardCallSignal(msg, ws);
+      } catch (err) {
+        console.error('Failed to handle WebRTC signaling', err);
+        sendSocketError(ws, 'WebRTC signaling error');
+      }
+      return;
+    }
+
   });
 
   ws.on('close', () => {
     onDisconnect(ws);
-    console.log('Client disconnected');
+    console.log('Client disconnected.userId =', ws.userId);
   });
 });
 
