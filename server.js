@@ -325,7 +325,7 @@ const forwardWebRTCSignal = (msg, ws) => {
     payload.sdp = msg.sdp;
   }
   if (msg.candidate) {
-    payload.candidate = msg.candidate;
+    payload.ice = msg.candidate;
   }
 
   targetSocket.send(JSON.stringify(payload));
