@@ -303,7 +303,8 @@ const forwardWebRTCSignal = (msg, ws) => {
       fromUserId: ws.userId,
       targetUserId,
       sdp: msg.sdp,
-      ice: msg.candidate
+      ice: msg.ice || msg.candidate,
+      candidate: msg.candidate,
     });
     //sendSocketError(ws, 'Target user is reconnecting');
     console.log('Target user is reconnecting. Buffered signal for', targetUserId);
@@ -324,8 +325,9 @@ const forwardWebRTCSignal = (msg, ws) => {
   if (msg.sdp) {
     payload.sdp = msg.sdp;
   }
-  if (msg.candidate) {
-    payload.ice = msg.candidate;
+  const candidate = msg.ice || msg.candidate;
+  if (candidate) {
+    payload.ice = candidate;
   }
 
   targetSocket.send(JSON.stringify(payload));
