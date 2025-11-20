@@ -303,7 +303,7 @@ const forwardWebRTCSignal = (msg, ws) => {
       fromUserId: ws.userId,
       targetUserId,
       sdp: msg.sdp,
-      candidate: msg.candidate
+      ice: msg.candidate
     });
     //sendSocketError(ws, 'Target user is reconnecting');
     console.log('Target user is reconnecting. Buffered signal for', targetUserId);
