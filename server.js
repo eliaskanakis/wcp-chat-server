@@ -260,7 +260,7 @@ const flushBufferedSignals = (socket) => {
   }
 };
 
-const forwardWebRTCSignal = (msg, ws) => {
+const forwardWebRTCSignal = (ws, msg) => {
   const { channelId: msgChannelId, targetUserId } = msg;
 
   // Determine the effective channel: from message or from socket
@@ -333,7 +333,7 @@ const forwardWebRTCSignal = (msg, ws) => {
   targetSocket.send(JSON.stringify(payload));
 };
 
-const forwardCallSignal = (msg, ws) => {
+const forwardCallSignal = (ws, msg) => {
   const { channelId: msgChannelId, targetUserId } = msg;
 
   const channelId = msgChannelId || ws.channelId;
@@ -523,6 +523,117 @@ const handleChannelJoin = async (socket, channelId, frbDecodedToken) => {
   });
 };
 
+const handleJoinMessage = async (ws, msg) => {
+  const channelId = msg.channelId;
+  if (!channelId) {
+    sendSocketError(ws, 'Join message missing channelId');
+    return;
+  }
+
+  const frbUserIdToken = msg.firebaseUserIdToken;
+  if (!frbUserIdToken) {
+    sendSocketError(ws, 'Join message missing firebaseUserIdToken');
+    return;
+  }
+
+  try {
+    const frbDecodedToken = await firebaseAccess.verifyIdToken(frbUserIdToken);
+    ws.userId = frbDecodedToken.uid;
+    ws.frbClaims = frbDecodedToken;
+    await handleChannelJoin(ws, channelId, frbDecodedToken);
+    console.log(`User ${ws.userId} joined channel ${channelId}`);
+  } catch (err) {
+    console.error('Failed to complete join', err);
+    sendSocketError(ws, err.message || 'Join failed');
+    if (!ws.channelId) {
+      ws.close(1008, 'Join failed');
+    }
+  }
+};
+
+const handleChatMessage = async (ws, msg) => {
+  const channelId = ws.channelId || msg.channelId;
+  if (!channelId) {
+    sendSocketError(ws, 'Chat message missing channel context');
+    return;
+  }
+
+  if (!ws.channelRole) {
+    sendSocketError(ws, 'Join a channel before sending messages');
+    return;
+  }
+
+  if (ws.channelRole === 'observer') {
+    sendSocketError(ws, 'Observer role cannot send messages');
+    return;
+  }
+
+  const payload = {
+    type: 'chat',
+    channelId,
+    from: ws.username || 'Anonymous',
+    text: msg.text || '',
+    ts: Date.now()
+  };
+
+  broadcastChatMessage(channelId, payload);
+  firebaseAccess.saveChatMessage(channelId, {
+    ...payload,
+    userId: ws.userId || null
+  });
+};
+
+const handleHistoryRequest = async (ws, msg) => {
+  const channelId = msg.channelId || ws.channelId;
+  if (!channelId) {
+    sendSocketError(ws, 'History request missing channelId');
+    return;
+  }
+
+  if (ws.channelId !== channelId) {
+    sendSocketError(ws, 'You can only request history for your current channel');
+    return;
+  }
+
+  const beforeTs = typeof msg.beforeTs === 'number' ? msg.beforeTs : undefined;
+  await sendRecentHistory(ws, channelId, beforeTs);
+};
+
+const handlePingMessage = (ws, msg) => {
+  if (ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  ws.send(JSON.stringify({
+    type: 'pong',
+    clientTs: msg.clientTs,
+    serverTs: Date.now()
+  }));
+};
+
+const MESSAGE_HANDLERS = {
+  join: handleJoinMessage,
+  chat: handleChatMessage,
+  'fetch-history': handleHistoryRequest,
+  ping: handlePingMessage,
+  'webrtc-offer': forwardWebRTCSignal,
+  'webrtc-answer': forwardWebRTCSignal,
+  'webrtc-ice': forwardWebRTCSignal,
+  'call-cancelled': forwardCallSignal,
+  'call-rejected': forwardCallSignal,
+  'call-ended': forwardCallSignal
+};
+
+const dispatchIncomingMessage = async (ws, msg) => {
+  const handler = MESSAGE_HANDLERS[msg.type];
+  if (!handler) {
+    console.warn('Unknown message type', msg.type);
+    return;
+  }
+
+  await handler(ws, msg);
+};
+
 wss.on('connection', (ws) => {
   console.log('Client connected');
 
@@ -544,112 +655,11 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    if (msg.type === 'join') {
-      const channelId = msg.channelId;
-      if (!channelId) {
-        console.error('Join message missing channelId');
-        sendSocketError(ws, 'Join message missing channelId');
-        return;
-      }
-      const frbUserIdToken = msg.firebaseUserIdToken;
-      if (!frbUserIdToken) {
-        console.error('Join message missing firebaseUserIdToken');
-        sendSocketError(ws, 'Join message missing firebaseUserIdToken');
-        return;
-      }
-
-      try {
-        const frbDecodedToken = await firebaseAccess.verifyIdToken(frbUserIdToken);
-        ws.userId = frbDecodedToken.uid;
-        ws.frbClaims = frbDecodedToken;
-        await handleChannelJoin(ws, channelId, frbDecodedToken);
-        console.log(`User ${ws.userId} joined channel ${channelId}`);
-      } catch (err) {
-        console.error('Failed to complete join', err);
-        sendSocketError(ws, err.message || 'Join failed');
-        if (!ws.channelId) {
-          ws.close(1008, 'Join failed');
-        }
-      }
-      return;
-    }
-
-    if (msg.type === 'chat') {
-      const channelId = ws.channelId || msg.channelId;
-      if (!channelId) {
-        console.error('Chat message missing channel context');
-        sendSocketError(ws, 'Chat message missing channel context');
-        return;
-      }
-
-      if (!ws.channelRole) {
-        sendSocketError(ws, 'Join a channel before sending messages');
-        return;
-      }
-
-      if (ws.channelRole === 'observer') {
-        sendSocketError(ws, 'Observer role cannot send messages');
-        return;
-      }
-
-      const payload = {
-        type: 'chat',
-        channelId,
-        from: ws.username || 'Anonymous',
-        text: msg.text || '',
-        ts: Date.now()
-      };
-
-      broadcastChatMessage(channelId, payload);
-      firebaseAccess.saveChatMessage(channelId, {
-        ...payload,
-        userId: ws.userId || null
-      });
-    }
-
-    if (msg.type === 'fetch-history') {
-      const channelId = msg.channelId || ws.channelId;
-      if (!channelId) {
-        sendSocketError(ws, 'History request missing channelId');
-        return;
-      }
-
-      if (ws.channelId !== channelId) {
-        sendSocketError(ws, 'You can only request history for your current channel');
-        return;
-      }
-
-      const beforeTs = typeof msg.beforeTs === 'number' ? msg.beforeTs : undefined;
-      await sendRecentHistory(ws, channelId, beforeTs);
-      return;
-    }
-
-    if (
-      msg.type === 'webrtc-offer' ||
-      msg.type === 'webrtc-answer' ||
-      msg.type === 'webrtc-ice'
-    ) {
-      try {
-        forwardWebRTCSignal(msg, ws);
-      } catch (err) {
-        console.error('Failed to handle WebRTC signaling', err);
-        sendSocketError(ws, 'WebRTC signaling error');
-      }
-      return;
-    }
-
-    if (
-      msg.type === 'call-cancelled' ||
-      msg.type === 'call-rejected' ||
-      msg.type === 'call-ended'
-    ) {
-      try {
-        forwardCallSignal(msg, ws);
-      } catch (err) {
-        console.error('Failed to handle WebRTC signaling', err);
-        sendSocketError(ws, 'WebRTC signaling error');
-      }
-      return;
+    try {
+      await dispatchIncomingMessage(ws, msg);
+    } catch (err) {
+      console.error(`Failed to process message of type ${msg.type}`, err);
+      sendSocketError(ws, 'Unexpected server error');
     }
 
   });

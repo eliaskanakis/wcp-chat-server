@@ -91,7 +91,6 @@ class FirebaseAccess extends EventEmitter {
 
   getCachedChannel(channelId) {
     if (!channelId) {
-      console.log('getCachedChannel called without channelId');
       return null;
     }
 
@@ -100,7 +99,6 @@ class FirebaseAccess extends EventEmitter {
 
   async fetchChannelDefinition(channelId) {
     if (!channelId) {
-      console.log('fetchChannelDefinition called without channelId');
       return null;
     }
 
