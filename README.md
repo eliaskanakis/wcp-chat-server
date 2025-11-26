@@ -18,4 +18,4 @@ The WebSocket server listens on `PORT` (default 4000). Supported message types i
 `deploy.ps1` holds a reference Cloud Run deployment command that expects an `.env-yaml` file containing your Firebase credentials (JSON encoded as base64).
 
 ## Demo
-YouTube placeholder: https://www.youtube.com/watch?v=XXXXXXXXXXX
+YouTube placeholder: https://www.youtube.com/watch?v=nZzlvX0EO1A
